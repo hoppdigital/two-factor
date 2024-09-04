@@ -42,7 +42,7 @@ class Two_Factor_Totp extends Two_Factor_Provider {
 	 *
 	 * @codeCoverageIgnore
 	 */
-	protected function __construct() {
+	public function __construct() {
 		add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_assets' ) );
 		add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_assets' ) );
