@@ -40,7 +40,7 @@ class Two_Factor_Email extends Two_Factor_Provider {
 	 *
 	 * @since 0.1-dev
 	 */
-	protected function __construct() {
+	public function __construct() {
 		add_action( 'two_factor_user_options_' . __CLASS__, array( $this, 'user_options' ) );
 		return parent::__construct();
 	}
