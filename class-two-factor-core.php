@@ -50,6 +50,20 @@ class Two_Factor_Core {
 	const USER_FAILED_LOGIN_ATTEMPTS_KEY = '_two_factor_failed_login_attempts';
 
 	/**
+	 * Option key for requiring two-factor (email by default) for all users.
+	 *
+	 * @type string
+	 */
+	const FORCE_ALL_USERS_OPTION_KEY = 'two_factor_force_all_users';
+
+	/**
+	 * Default provider when two-factor is applied site-wide for a user.
+	 *
+	 * @type string
+	 */
+	const FORCE_ALL_USERS_DEFAULT_PROVIDER = 'Two_Factor_Email';
+
+	/**
 	 * The user meta key to store whether or not the password was reset.
 	 *
 	 * @var string
@@ -189,7 +203,10 @@ class Two_Factor_Core {
 			self::USER_PASSWORD_WAS_RESET_KEY,
 		);
 
-		$option_keys = array();
+		$option_keys = array(
+			self::FORCE_ALL_USERS_OPTION_KEY,
+			'two_factor_enabled_providers',
+		);
 
 		$providers = self::get_default_providers();
 
@@ -782,6 +799,17 @@ class Two_Factor_Core {
 		return null;
 	}
 
+	public static function maybe_log( $message ) {
+
+		$WP_DEBUG = defined('WP_DEBUG') ? WP_DEBUG : false;
+		$WP_DEBUG_LOG = defined('WP_DEBUG_LOG') ? WP_DEBUG_LOG : false;
+		if(!$WP_DEBUG || !$WP_DEBUG_LOG) {
+			return;
+		}
+
+		error_log( $message );
+	}
+
 	/**
 	 * Gets the Two-Factor Auth provider for the specified|current user.
 	 *
@@ -865,17 +893,23 @@ class Two_Factor_Core {
 			$current_origin = ! empty( $_SERVER['HTTP_REFERER'] ) ? sanitize_text_field( $_SERVER['HTTP_REFERER'] ) : null;
 		}
 
-		// get frontend url
-		$faustwp_settings = get_option('faustwp_settings');
+		if ( ! self::is_user_using_two_factor( $user->ID ) ) {
+			self::maybe_log( 'Two-factor is not enabled for user: ' . $user->ID . ' because it is not enabled' );
+			return;
+		}
 
-		$frontend_uri = ($faustwp_settings['frontend_uri']);
-	
-		// this is returning "https:\/\/localhost:3000"
-		// we need it in the format https://localhost:3000
-		$frontend_uri = str_replace('\\', '', $frontend_uri);
-		$frontend_uri = str_replace('"', '', $frontend_uri);
-	
-		if ( ! self::is_user_using_two_factor( $user->ID ) || $current_origin === $frontend_uri ) {
+		// Skip 2FA when logging in from the FaustWP headless frontend (if configured).
+		$faustwp_settings = get_option( 'faustwp_settings' );
+		$frontend_uri     = '';
+
+		if ( is_array( $faustwp_settings ) && ! empty( $faustwp_settings['frontend_uri'] ) ) {
+			// Stored value may include escaped slashes/quotes, e.g. "https:\/\/localhost:3000".
+			$frontend_uri = (string) $faustwp_settings['frontend_uri'];
+			$frontend_uri = str_replace( array( '\\', '"' ), '', $frontend_uri );
+		}
+
+		if ( $frontend_uri && $current_origin === $frontend_uri ) {
+			self::maybe_log( 'Two-factor is not enabled for user: ' . $user->ID . ' because it is from the FaustWP headless frontend' );
 			return;
 		}
 	
@@ -2356,6 +2390,95 @@ class Two_Factor_Core {
 	}
 
 	/**
+	 * Whether two-factor is required for every user (email by default).
+	 *
+	 * @since 0.16.1
+	 *
+	 * @return bool
+	 */
+	public static function is_force_all_users_enabled() {
+		return (bool) get_option( self::FORCE_ALL_USERS_OPTION_KEY, false );
+	}
+
+	/**
+	 * Enable email two-factor for a user who has no methods configured yet.
+	 *
+	 * @since 0.16.1
+	 *
+	 * @param int $user_id User ID.
+	 * @return bool True when the user has email two-factor after this call.
+	 */
+	public static function enable_email_for_user( $user_id ) {
+		$user = self::fetch_user( $user_id );
+		if ( ! $user ) {
+			return false;
+		}
+
+		$providers = self::get_supported_providers_for_user( $user );
+		if ( ! isset( $providers[ self::FORCE_ALL_USERS_DEFAULT_PROVIDER ] ) ) {
+			return false;
+		}
+
+		$enabled_providers = get_user_meta( $user_id, self::ENABLED_PROVIDERS_USER_META_KEY, true );
+		if ( ! empty( $enabled_providers ) ) {
+			return true;
+		}
+
+		update_user_meta( $user_id, self::ENABLED_PROVIDERS_USER_META_KEY, array( self::FORCE_ALL_USERS_DEFAULT_PROVIDER ) );
+		update_user_meta( $user_id, self::PROVIDER_USER_META_KEY, self::FORCE_ALL_USERS_DEFAULT_PROVIDER );
+
+		return true;
+	}
+
+	/**
+	 * Apply site-wide two-factor to any user without a configured method.
+	 *
+	 * @since 0.16.1
+	 *
+	 * @return int Number of users updated.
+	 */
+	public static function apply_force_all_users_to_all_accounts() {
+		if ( ! self::is_force_all_users_enabled() ) {
+			return 0;
+		}
+
+		$user_ids = get_users(
+			array(
+				'fields' => 'ID',
+			)
+		);
+
+		$updated = 0;
+
+		foreach ( $user_ids as $user_id ) {
+			$user_id      = (int) $user_id;
+			$was_enabled  = get_user_meta( $user_id, self::ENABLED_PROVIDERS_USER_META_KEY, true );
+
+			if ( self::enable_email_for_user( $user_id ) && empty( $was_enabled ) ) {
+				++$updated;
+			}
+		}
+
+		return $updated;
+	}
+
+	/**
+	 * Ensure a user has email two-factor when site-wide enforcement is enabled.
+	 *
+	 * @since 0.16.1
+	 *
+	 * @param int $user_id User ID.
+	 * @return void
+	 */
+	public static function ensure_forced_email_for_user( $user_id ) {
+		if ( ! self::is_force_all_users_enabled() ) {
+			return;
+		}
+
+		self::enable_email_for_user( $user_id );
+	}
+
+	/**
 	 * Enable a provider for a user.
 	 *
 	 * The caller is responsible for checking the user has permission to do this.
@@ -2485,10 +2608,14 @@ class Two_Factor_Core {
 				delete_user_meta( $user_id, self::PROVIDER_USER_META_KEY );
 			}
 
+			self::ensure_forced_email_for_user( $user_id );
+
+			$enabled_provider_keys = self::get_enabled_providers_for_user( $user_id );
+
 			// Have we changed the two-factor settings for the current user? Alter their session metadata.
 			if ( get_current_user_id() === $user_id ) {
 
-				if ( $enabled_providers && ! $existing_providers && ! self::is_current_user_session_two_factor() ) {
+				if ( $enabled_provider_keys && ! $existing_providers && ! self::is_current_user_session_two_factor() ) {
 					// We've enabled two-factor from a non-two-factor session, set the key but not the provider, as no provider has been used yet.
 					self::update_current_user_session(
 						array(
@@ -2496,7 +2623,7 @@ class Two_Factor_Core {
 							'two-factor-login'    => time(),
 						)
 					);
-				} elseif ( $existing_providers && ! $enabled_providers ) {
+				} elseif ( $existing_providers && ! $enabled_provider_keys ) {
 					// We've disabled two-factor, remove session metadata.
 					self::update_current_user_session(
 						array(
@@ -2510,9 +2637,9 @@ class Two_Factor_Core {
 			// Destroy other sessions if setup 2FA for the first time, or deactivated a provider.
 			if (
 				// No providers, enabling one (or more).
-				( ! $existing_providers && $enabled_providers ) ||
+				( ! $existing_providers && $enabled_provider_keys ) ||
 				// Has providers, and is disabling one (or more), but remaining with 2FA.
-				( $existing_providers && $enabled_providers && array_diff( $existing_providers, array_keys( $enabled_providers ) ) )
+				( $existing_providers && $enabled_provider_keys && array_diff( $existing_providers, $enabled_provider_keys ) )
 			) {
 				if ( get_current_user_id() === $user_id ) {
 					// Keep the current session, destroy others sessions for this user.

@@ -77,6 +77,9 @@ function two_factor_register_admin_hooks() {
 	/* Enforcement filters: restrict providers based on saved enabled-providers option. */
 	add_filter( 'two_factor_providers', 'two_factor_filter_enabled_providers' );
 	add_filter( 'two_factor_enabled_providers_for_user', 'two_factor_filter_enabled_providers_for_user', 10, 2 );
+	add_filter( 'two_factor_enabled_providers_for_user', 'two_factor_maybe_force_email_for_user', 20, 2 );
+
+	add_action( 'user_register', 'two_factor_enable_email_for_new_user' );
 }
 
 add_action( 'init', 'two_factor_register_admin_hooks' );
@@ -187,4 +190,47 @@ function two_factor_filter_enabled_providers_for_user( $enabled, $user_id ) {
 	}
 
 	return array_values( array_intersect( (array) $enabled, $site_enabled ) );
+}
+
+/**
+ * When site-wide enforcement is on, users without a method use email by default.
+ *
+ * @since 0.16.1
+ *
+ * @param array $enabled Enabled provider classnames for the user.
+ * @param int   $user_id User ID.
+ * @return array
+ */
+function two_factor_maybe_force_email_for_user( $enabled, $user_id ) {
+	if ( ! class_exists( 'Two_Factor_Core' ) || ! Two_Factor_Core::is_force_all_users_enabled() ) {
+		return $enabled;
+	}
+
+	if ( ! empty( $enabled ) ) {
+		return $enabled;
+	}
+
+	$site_enabled = two_factor_get_enabled_providers_option();
+
+	if ( null !== $site_enabled && ! in_array( Two_Factor_Core::FORCE_ALL_USERS_DEFAULT_PROVIDER, $site_enabled, true ) ) {
+		return $enabled;
+	}
+
+	return array( Two_Factor_Core::FORCE_ALL_USERS_DEFAULT_PROVIDER );
+}
+
+/**
+ * Enable email two-factor for newly registered users when site-wide enforcement is on.
+ *
+ * @since 0.16.1
+ *
+ * @param int $user_id User ID.
+ * @return void
+ */
+function two_factor_enable_email_for_new_user( $user_id ) {
+	if ( ! class_exists( 'Two_Factor_Core' ) || ! Two_Factor_Core::is_force_all_users_enabled() ) {
+		return;
+	}
+
+	Two_Factor_Core::enable_email_for_user( $user_id );
 }
