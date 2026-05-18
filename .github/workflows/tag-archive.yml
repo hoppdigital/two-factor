@@ -1,0 +1,70 @@
+name: Create Archive for Tag
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'              # Matches tags like v1.0.0, v1.0.0-alpha, v1.0.4-alpha
+      - 'two-factor-v[0-9]+.[0-9]+.[0-9]+*'    # Matches tags like two-factor-v1.0.0, two-factor-v1.0.0-alpha
+
+jobs:
+  create-archive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build project
+        run: bun run build
+
+      - name: Create archive
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          ARCHIVE_NAME="two-factor-${TAG_NAME}.zip"
+
+          # Package the production plugin from dist/ (same layout as repo plugin root).
+          cd dist
+          zip -r "../${ARCHIVE_NAME}" \
+            providers/ \
+            includes/ \
+            settings/ \
+            two-factor.php \
+            class-two-factor-core.php \
+            class-two-factor-compat.php \
+            user-edit.css \
+            readme.txt \
+            LICENSE.md
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-factor-archive
+          path: two-factor-*.zip
+          retention-days: 90
+
+      - name: Create release if it doesn't exist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          if ! gh release view "$TAG_NAME"; then
+            gh release create "$TAG_NAME" --title="$TAG_NAME" --notes="Automated release for $TAG_NAME"
+          fi
+
+      - name: Attach archive to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          ARCHIVE_NAME="two-factor-${TAG_NAME}.zip"
+
+          echo "=== Attaching ${ARCHIVE_NAME} to release ${TAG_NAME} ==="
+          gh release upload "${TAG_NAME}" "${ARCHIVE_NAME}" --clobber
