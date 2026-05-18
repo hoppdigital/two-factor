@@ -28,11 +28,13 @@ class Two_Factor_Settings {
 			return;
 		}
 
-		$users_updated = 0;
+		$backfill_scheduled = false;
 
 		// Handle save.
 		if ( isset( $_POST['two_factor_settings_submit'] ) ) {
 			check_admin_referer( 'two_factor_save_settings', 'two_factor_settings_nonce' );
+
+			$was_force_all_users = class_exists( 'Two_Factor_Core' ) && Two_Factor_Core::is_force_all_users_enabled();
 
 			$posted = isset( $_POST['two_factor_enabled_providers'] ) && is_array( $_POST['two_factor_enabled_providers'] ) ? wp_unslash( $_POST['two_factor_enabled_providers'] ) : array();
 
@@ -50,26 +52,16 @@ class Two_Factor_Settings {
 			update_option( 'two_factor_enabled_providers', array_values( array_unique( $enabled ) ) );
 			update_option( Two_Factor_Core::FORCE_ALL_USERS_OPTION_KEY, $force_all_users );
 
-			if ( $force_all_users ) {
-				$users_updated = Two_Factor_Core::apply_force_all_users_to_all_accounts();
+			if ( $force_all_users && ! $was_force_all_users ) {
+				Two_Factor_Core::schedule_force_all_users_backfill();
+				$backfill_scheduled = true;
+			} elseif ( ! $force_all_users && $was_force_all_users ) {
+				Two_Factor_Core::cancel_force_all_users_backfill();
 			}
 
 			echo '<div class="updated"><p>' . esc_html__( 'Settings saved.', 'two-factor' ) . '</p></div>';
-			if ( $force_all_users && $users_updated > 0 ) {
-				echo '<div class="updated"><p>';
-				printf(
-					/* translators: %d: number of users */
-					esc_html(
-						_n(
-							'Email two-factor authentication was enabled for %d user who did not have a method configured.',
-							'Email two-factor authentication was enabled for %d users who did not have a method configured.',
-							$users_updated,
-							'two-factor'
-						)
-					),
-					(int) $users_updated
-				);
-				echo '</p></div>';
+			if ( $backfill_scheduled ) {
+				echo '<div class="updated"><p>' . esc_html__( 'Email two-factor is being enabled for existing users in the background. New users will be enrolled automatically.', 'two-factor' ) . '</p></div>';
 			}
 		}
 
@@ -119,6 +111,10 @@ class Two_Factor_Settings {
 
 		echo '</tbody></table>';
 		echo '</fieldset>';
+
+		if ( class_exists( 'Two_Factor_Core' ) && Two_Factor_Core::is_force_all_users_backfill_running() ) {
+			echo '<div class="notice notice-info"><p>' . esc_html__( 'Enabling email two-factor for existing users is in progress.', 'two-factor' ) . '</p></div>';
+		}
 
 		echo '<h2>' . esc_html__( 'Site-wide Enforcement', 'two-factor' ) . '</h2>';
 		echo '<table class="form-table"><tbody>';

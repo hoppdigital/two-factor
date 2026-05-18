@@ -64,6 +64,27 @@ class Two_Factor_Core {
 	const FORCE_ALL_USERS_DEFAULT_PROVIDER = 'Two_Factor_Email';
 
 	/**
+	 * Cron hook for backfilling email two-factor onto existing users.
+	 *
+	 * @type string
+	 */
+	const FORCE_ALL_USERS_CRON_HOOK = 'two_factor_apply_force_all_users_batch';
+
+	/**
+	 * Option storing the user-query offset for the force-all backfill.
+	 *
+	 * @type string
+	 */
+	const FORCE_ALL_USERS_BATCH_OFFSET_OPTION = 'two_factor_force_all_users_batch_offset';
+
+	/**
+	 * Number of users processed per backfill batch.
+	 *
+	 * @type int
+	 */
+	const FORCE_ALL_USERS_BATCH_SIZE = 100;
+
+	/**
 	 * The user meta key to store whether or not the password was reset.
 	 *
 	 * @var string
@@ -193,6 +214,8 @@ class Two_Factor_Core {
 	 * @return void
 	 */
 	public static function uninstall() {
+		self::cancel_force_all_users_backfill();
+
 		// Keep this updated as user meta keys are added or removed.
 		$user_meta_keys = array(
 			self::PROVIDER_USER_META_KEY,
@@ -205,6 +228,7 @@ class Two_Factor_Core {
 
 		$option_keys = array(
 			self::FORCE_ALL_USERS_OPTION_KEY,
+			self::FORCE_ALL_USERS_BATCH_OFFSET_OPTION,
 			'two_factor_enabled_providers',
 		);
 
@@ -799,17 +823,6 @@ class Two_Factor_Core {
 		return null;
 	}
 
-	public static function maybe_log( $message ) {
-
-		$WP_DEBUG = defined('WP_DEBUG') ? WP_DEBUG : false;
-		$WP_DEBUG_LOG = defined('WP_DEBUG_LOG') ? WP_DEBUG_LOG : false;
-		if(!$WP_DEBUG || !$WP_DEBUG_LOG) {
-			return;
-		}
-
-		error_log( $message );
-	}
-
 	/**
 	 * Gets the Two-Factor Auth provider for the specified|current user.
 	 *
@@ -894,7 +907,6 @@ class Two_Factor_Core {
 		}
 
 		if ( ! self::is_user_using_two_factor( $user->ID ) ) {
-			self::maybe_log( 'Two-factor is not enabled for user: ' . $user->ID . ' because it is not enabled' );
 			return;
 		}
 
@@ -909,7 +921,6 @@ class Two_Factor_Core {
 		}
 
 		if ( $frontend_uri && $current_origin === $frontend_uri ) {
-			self::maybe_log( 'Two-factor is not enabled for user: ' . $user->ID . ' because it is from the FaustWP headless frontend' );
 			return;
 		}
 	
@@ -2409,6 +2420,11 @@ class Two_Factor_Core {
 	 * @return bool True when the user has email two-factor after this call.
 	 */
 	public static function enable_email_for_user( $user_id ) {
+		$enabled_providers = get_user_meta( $user_id, self::ENABLED_PROVIDERS_USER_META_KEY, true );
+		if ( ! empty( $enabled_providers ) ) {
+			return true;
+		}
+
 		$user = self::fetch_user( $user_id );
 		if ( ! $user ) {
 			return false;
@@ -2419,9 +2435,21 @@ class Two_Factor_Core {
 			return false;
 		}
 
+		return self::enable_email_for_user_if_unconfigured( $user_id );
+	}
+
+	/**
+	 * Enable email two-factor when the user has no methods configured (meta only).
+	 *
+	 * @since 0.16.1
+	 *
+	 * @param int $user_id User ID.
+	 * @return bool True when email was enabled, false if already configured or update failed.
+	 */
+	private static function enable_email_for_user_if_unconfigured( $user_id ) {
 		$enabled_providers = get_user_meta( $user_id, self::ENABLED_PROVIDERS_USER_META_KEY, true );
 		if ( ! empty( $enabled_providers ) ) {
-			return true;
+			return false;
 		}
 
 		update_user_meta( $user_id, self::ENABLED_PROVIDERS_USER_META_KEY, array( self::FORCE_ALL_USERS_DEFAULT_PROVIDER ) );
@@ -2431,35 +2459,76 @@ class Two_Factor_Core {
 	}
 
 	/**
-	 * Apply site-wide two-factor to any user without a configured method.
+	 * Whether a background backfill is running for site-wide enforcement.
 	 *
 	 * @since 0.16.1
 	 *
-	 * @return int Number of users updated.
+	 * @return bool
 	 */
-	public static function apply_force_all_users_to_all_accounts() {
+	public static function is_force_all_users_backfill_running() {
+		return (bool) wp_next_scheduled( self::FORCE_ALL_USERS_CRON_HOOK );
+	}
+
+	/**
+	 * Schedule batched backfill of email two-factor for existing users.
+	 *
+	 * @since 0.16.1
+	 *
+	 * @return void
+	 */
+	public static function schedule_force_all_users_backfill() {
+		self::cancel_force_all_users_backfill();
+		update_option( self::FORCE_ALL_USERS_BATCH_OFFSET_OPTION, 0 );
+		wp_schedule_single_event( time(), self::FORCE_ALL_USERS_CRON_HOOK );
+	}
+
+	/**
+	 * Cancel any in-progress site-wide backfill.
+	 *
+	 * @since 0.16.1
+	 *
+	 * @return void
+	 */
+	public static function cancel_force_all_users_backfill() {
+		wp_clear_scheduled_hook( self::FORCE_ALL_USERS_CRON_HOOK );
+		delete_option( self::FORCE_ALL_USERS_BATCH_OFFSET_OPTION );
+	}
+
+	/**
+	 * Process one batch of the site-wide email two-factor backfill.
+	 *
+	 * @since 0.16.1
+	 *
+	 * @return void
+	 */
+	public static function process_force_all_users_batch() {
 		if ( ! self::is_force_all_users_enabled() ) {
-			return 0;
+			self::cancel_force_all_users_backfill();
+			return;
 		}
 
+		$offset   = (int) get_option( self::FORCE_ALL_USERS_BATCH_OFFSET_OPTION, 0 );
 		$user_ids = get_users(
 			array(
-				'fields' => 'ID',
+				'fields'  => 'ID',
+				'number'  => self::FORCE_ALL_USERS_BATCH_SIZE,
+				'offset'  => $offset,
+				'orderby' => 'ID',
+				'order'   => 'ASC',
 			)
 		);
 
-		$updated = 0;
-
-		foreach ( $user_ids as $user_id ) {
-			$user_id      = (int) $user_id;
-			$was_enabled  = get_user_meta( $user_id, self::ENABLED_PROVIDERS_USER_META_KEY, true );
-
-			if ( self::enable_email_for_user( $user_id ) && empty( $was_enabled ) ) {
-				++$updated;
-			}
+		if ( empty( $user_ids ) ) {
+			self::cancel_force_all_users_backfill();
+			return;
 		}
 
-		return $updated;
+		foreach ( $user_ids as $user_id ) {
+			self::enable_email_for_user_if_unconfigured( (int) $user_id );
+		}
+
+		update_option( self::FORCE_ALL_USERS_BATCH_OFFSET_OPTION, $offset + count( $user_ids ) );
+		wp_schedule_single_event( time() + 1, self::FORCE_ALL_USERS_CRON_HOOK );
 	}
 
 	/**

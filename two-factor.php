@@ -84,6 +84,8 @@ function two_factor_register_admin_hooks() {
 
 add_action( 'init', 'two_factor_register_admin_hooks' );
 
+add_action( Two_Factor_Core::FORCE_ALL_USERS_CRON_HOOK, array( 'Two_Factor_Core', 'process_force_all_users_batch' ) );
+
 /**
  * Add the Two Factor settings page under Settings.
  *
