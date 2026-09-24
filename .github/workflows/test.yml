@@ -1,6 +1,16 @@
 name: Test
 
-on: [push, pull_request]
+# Pushing to a branch that has an open PR previously triggered this workflow twice: once
+# for `push` and once for `pull_request`. The concurrency group below cannot collapse the
+# pair, because it deliberately keys pull requests on the branch name and everything else
+# on the commit hash, putting the two runs in different groups. Limiting `push` to the
+# default branch leaves pull requests covered by the `pull_request` event alone, while
+# still running the suite on merges to master.
+on:
+    push:
+        branches:
+            - master
+    pull_request:
 
 # Cancels all previous workflow runs for pull requests that have not completed.
 concurrency:
@@ -9,10 +19,17 @@ concurrency:
     group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
     cancel-in-progress: true
 
+# Disable permissions for all available scopes by default.
+# Any needed permissions should be configured at the job level.
+permissions: {}
+
 jobs:
     lint-js-css:
         name: Lint JS & CSS
         runs-on: ubuntu-24.04
+        timeout-minutes: 20
+        permissions:
+          contents: read # Required to clone the repo.
         steps:
             - name: Checkout
               uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
@@ -35,6 +52,9 @@ jobs:
     lint-php-and-compatibility:
         name: Lint PHP & PHP Compatibility checks.
         runs-on: ubuntu-24.04
+        timeout-minutes: 20
+        permissions:
+          contents: read # Required to clone the repo.
         steps:
             - name: Checkout
               uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
@@ -54,7 +74,7 @@ jobs:
               run: npm install
 
             - name: Lint PHP
-              run: npm run lint:php || true # Ignore for now.
+              run: npm run lint:php
 
             - name: Lint PHP Compatibility
               run: composer lint-compat
@@ -65,32 +85,43 @@ jobs:
     test-php:
         name: Test PHP ${{ matrix.php }} ${{ matrix.wp != '' && format( ' (WP {0}) ', matrix.wp ) || '' }}
         runs-on: ubuntu-24.04
+        timeout-minutes: 20
+        permissions:
+          contents: read # Required to clone the repo.
         strategy:
+            # One broken leg should not cancel the rest of the matrix and hide every
+            # other result.
+            fail-fast: false
             matrix:
+                # PHP 7.4 and 8.0 cannot be run here any more. wp-env builds from
+                # `wordpress:php<version>`, and those two tags were last rebuilt in 2022
+                # and 2023 respectively, permanently pinned to Debian bullseye. Bullseye
+                # LTS ended 2026-08-31, so its security Release file is now expired and
+                # the `apt-get -qy update` in wp-env's generated Dockerfile exits 100
+                # before a single test runs. No bookworm image exists for either version,
+                # and wp-env hardcodes both the base image and that apt call, so there is
+                # nothing to configure our way out of.
+                #
+                # NOTE: PHP 7.4 is still this plugin's declared minimum ("Requires PHP" in
+                # two-factor.php, `>=7.4` in composer.json). It remains covered statically
+                # by PHPCompatibilityWP via `testVersion 7.4-` in phpcs.xml.dist, but it
+                # is no longer exercised at runtime. 8.1 is now the lowest version we
+                # actually run the suite against.
                 php:
                   - '8.5'
                   - '8.4'
                   - '8.3'
                   - '8.2'
                   - '8.1'
-                  - '8.0'
-                  - '7.4'
-                  - '7.3'
-                  - '7.2'
                 wp:
                   - latest
-                  - trunk
-                  - '6.8'
-                exclude:
-                  - php: '7.3'
-                    wp: trunk
-                  - php: '7.2'
-                    wp: trunk
-                  - php: '8.5'
-                    wp: '6.8'
+                  - wordpress/wordpress
+                  - wordpress/wordpress#7.1-branch
+                  - wordpress/wordpress#7.0-branch
+
         env:
             WP_ENV_PHP_VERSION: ${{ matrix.php }}
-            WP_ENV_CORE: ${{ matrix.wp == 'trunk' && 'WordPress/WordPress' || format( 'https://wordpress.org/wordpress-{0}.zip', matrix.wp ) }}
+            WP_ENV_CORE: ${{ matrix.wp == 'latest' && 'https://wordpress.org/wordpress-latest.zip' || matrix.wp }}
 
         steps:
             - name: Checkout
@@ -141,6 +172,9 @@ jobs:
     build:
         name: Build
         runs-on: ubuntu-24.04
+        timeout-minutes: 20
+        permissions:
+          contents: read # Required to clone the repo.
         steps:
             - name: Checkout
               uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0

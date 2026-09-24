@@ -1,5 +1,6 @@
 # Directories
 /.wordpress-org/
+/docs/
 /node_modules/
 /tests/
 /vendor/

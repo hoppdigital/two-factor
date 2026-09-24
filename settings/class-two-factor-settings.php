@@ -36,12 +36,19 @@ class Two_Factor_Settings {
 
 			$was_force_all_users = class_exists( 'Two_Factor_Core' ) && Two_Factor_Core::is_force_all_users_enabled();
 
-			$posted = isset( $_POST['two_factor_enabled_providers'] ) && is_array( $_POST['two_factor_enabled_providers'] ) ? wp_unslash( $_POST['two_factor_enabled_providers'] ) : array();
+			$posted = isset( $_POST['two_factor_enabled_providers'] ) && is_array( $_POST['two_factor_enabled_providers'] ) ? wp_unslash( $_POST['two_factor_enabled_providers'] ) : array(); // phpcs:ignore WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Nonce verified above; array values sanitized immediately below.
 
 			// Sanitize posted values immediately.
 			$posted = array_map( 'sanitize_text_field', (array) $posted );
 			// Remove empty values.
-			$enabled = array_values( array_filter( $posted, 'strlen' ) );
+			$enabled = array_values(
+				array_filter(
+					$posted,
+					static function ( $value ) {
+						return '' !== $value;
+					}
+				)
+			);
 
 			$force_all_users = ! empty( $_POST['two_factor_force_all_users'] );
 
@@ -49,7 +56,7 @@ class Two_Factor_Settings {
 				$enabled[] = Two_Factor_Core::FORCE_ALL_USERS_DEFAULT_PROVIDER;
 			}
 
-			update_option( 'two_factor_enabled_providers', array_values( array_unique( $enabled ) ) );
+			update_option( Two_Factor_Core::ENABLED_PROVIDERS_OPTION_KEY, array_values( array_unique( $enabled ) ) );
 			update_option( Two_Factor_Core::FORCE_ALL_USERS_OPTION_KEY, $force_all_users );
 
 			if ( $force_all_users && ! $was_force_all_users ) {
@@ -57,6 +64,7 @@ class Two_Factor_Settings {
 				$backfill_scheduled = true;
 			} elseif ( ! $force_all_users && $was_force_all_users ) {
 				Two_Factor_Core::cancel_force_all_users_backfill();
+				delete_option( Two_Factor_Core::FORCE_ALL_USERS_SKIPPED_OPTION );
 			}
 
 			echo '<div class="updated"><p>' . esc_html__( 'Settings saved.', 'two-factor' ) . '</p></div>';
@@ -66,17 +74,14 @@ class Two_Factor_Settings {
 		}
 
 		// Build provider list for display using public core API.
-		$provider_instances = array();
-		if ( class_exists( 'Two_Factor_Core' ) && method_exists( 'Two_Factor_Core', 'get_providers' ) ) {
-			$provider_instances = Two_Factor_Core::get_providers();
-			if ( ! is_array( $provider_instances ) ) {
-				$provider_instances = array();
-			}
+		$provider_instances = Two_Factor_Core::get_providers();
+		if ( ! is_array( $provider_instances ) ) {
+			$provider_instances = array();
 		}
 
 		// Default to all providers enabled when the option has never been saved.
 		$all_provider_keys = array_keys( $provider_instances );
-		$saved_enabled     = get_option( 'two_factor_enabled_providers', $all_provider_keys );
+		$saved_enabled     = get_option( Two_Factor_Core::ENABLED_PROVIDERS_OPTION_KEY, $all_provider_keys );
 		$force_all_users   = class_exists( 'Two_Factor_Core' ) && Two_Factor_Core::is_force_all_users_enabled();
 
 		echo '<div class="wrap two-factor-settings">';
@@ -114,6 +119,23 @@ class Two_Factor_Settings {
 
 		if ( class_exists( 'Two_Factor_Core' ) && Two_Factor_Core::is_force_all_users_backfill_running() ) {
 			echo '<div class="notice notice-info"><p>' . esc_html__( 'Enabling email two-factor for existing users is in progress.', 'two-factor' ) . '</p></div>';
+		}
+
+		$skipped_users = $force_all_users ? Two_Factor_Core::get_force_all_users_skipped_count() : 0;
+		if ( $skipped_users ) {
+			// Enforcement fails open for these accounts, so say so rather than implying every account is covered.
+			echo '<div class="notice notice-warning"><p>' . esc_html(
+				sprintf(
+					/* translators: %d: number of users. */
+					_n(
+						'%d user could not be given email two-factor, usually because their account has no valid email address. They can still log in with only a password until they set up another method or their email address is fixed.',
+						'%d users could not be given email two-factor, usually because their accounts have no valid email address. They can still log in with only a password until they set up another method or their email address is fixed.',
+						$skipped_users,
+						'two-factor'
+					),
+					$skipped_users
+				)
+			) . '</p></div>';
 		}
 
 		echo '<h2>' . esc_html__( 'Site-wide Enforcement', 'two-factor' ) . '</h2>';
