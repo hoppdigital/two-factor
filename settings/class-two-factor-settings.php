@@ -64,6 +64,7 @@ class Two_Factor_Settings {
 				$backfill_scheduled = true;
 			} elseif ( ! $force_all_users && $was_force_all_users ) {
 				Two_Factor_Core::cancel_force_all_users_backfill();
+				delete_option( Two_Factor_Core::FORCE_ALL_USERS_SKIPPED_OPTION );
 			}
 
 			echo '<div class="updated"><p>' . esc_html__( 'Settings saved.', 'two-factor' ) . '</p></div>';
@@ -118,6 +119,23 @@ class Two_Factor_Settings {
 
 		if ( class_exists( 'Two_Factor_Core' ) && Two_Factor_Core::is_force_all_users_backfill_running() ) {
 			echo '<div class="notice notice-info"><p>' . esc_html__( 'Enabling email two-factor for existing users is in progress.', 'two-factor' ) . '</p></div>';
+		}
+
+		$skipped_users = $force_all_users ? Two_Factor_Core::get_force_all_users_skipped_count() : 0;
+		if ( $skipped_users ) {
+			// Enforcement fails open for these accounts, so say so rather than implying every account is covered.
+			echo '<div class="notice notice-warning"><p>' . esc_html(
+				sprintf(
+					/* translators: %d: number of users. */
+					_n(
+						'%d user could not be given email two-factor, usually because their account has no valid email address. They can still log in with only a password until they set up another method or their email address is fixed.',
+						'%d users could not be given email two-factor, usually because their accounts have no valid email address. They can still log in with only a password until they set up another method or their email address is fixed.',
+						$skipped_users,
+						'two-factor'
+					),
+					$skipped_users
+				)
+			) . '</p></div>';
 		}
 
 		echo '<h2>' . esc_html__( 'Site-wide Enforcement', 'two-factor' ) . '</h2>';

@@ -80,11 +80,20 @@ class Two_Factor_Core {
 	const FORCE_ALL_USERS_CRON_HOOK = 'two_factor_apply_force_all_users_batch';
 
 	/**
-	 * Option storing the user-query offset for the force-all backfill.
+	 * Option storing the last user ID processed by the force-all backfill.
+	 *
+	 * The key still says "offset" because sites may have a run in progress under it.
 	 *
 	 * @type string
 	 */
 	const FORCE_ALL_USERS_BATCH_OFFSET_OPTION = 'two_factor_force_all_users_batch_offset';
+
+	/**
+	 * Option storing how many users the force-all backfill could not enrol.
+	 *
+	 * @type string
+	 */
+	const FORCE_ALL_USERS_SKIPPED_OPTION = 'two_factor_force_all_users_skipped';
 
 	/**
 	 * Number of users processed per backfill batch.
@@ -241,6 +250,7 @@ class Two_Factor_Core {
 			self::ENABLED_PROVIDERS_OPTION_KEY,
 			self::FORCE_ALL_USERS_OPTION_KEY,
 			self::FORCE_ALL_USERS_BATCH_OFFSET_OPTION,
+			self::FORCE_ALL_USERS_SKIPPED_OPTION,
 		);
 
 		$providers = self::get_default_providers();
@@ -913,38 +923,16 @@ class Two_Factor_Core {
 	 * @param WP_User $user WP_User object of the logged-in user.
 	 */
 	public static function wp_login( $user_login, $user ) {
-		// get request 
-
-		$current_origin = get_http_origin();
-	
-		if ( empty( $current_origin ) ) {
-			$current_origin = ! empty( $_SERVER['HTTP_REFERER'] ) ? sanitize_text_field( $_SERVER['HTTP_REFERER'] ) : null;
-		}
-
 		if ( ! self::is_user_using_two_factor( $user->ID ) ) {
 			return;
 		}
 
-		// Skip 2FA when logging in from the FaustWP headless frontend (if configured).
-		$faustwp_settings = get_option( 'faustwp_settings' );
-		$frontend_uri     = '';
-
-		if ( is_array( $faustwp_settings ) && ! empty( $faustwp_settings['frontend_uri'] ) ) {
-			// Stored value may include escaped slashes/quotes, e.g. "https:\/\/localhost:3000".
-			$frontend_uri = (string) $faustwp_settings['frontend_uri'];
-			$frontend_uri = str_replace( array( '\\', '"' ), '', $frontend_uri );
-		}
-
-		if ( $frontend_uri && $current_origin === $frontend_uri ) {
-			return;
-		}
-	
 		// Invalidate the current login session to prevent from being re-used.
 		self::destroy_current_session_for_user( $user );
-	
+
 		// Also clear the cookies which are no longer valid.
 		wp_clear_auth_cookie();
-	
+
 		self::show_two_factor_login( $user );
 		exit;
 	}
@@ -1193,7 +1181,7 @@ class Two_Factor_Core {
 		}
 
 		$backup_providers = array_diff_key( $available_providers, array( $provider_key => null ) );
-		$interim_login      = isset( $_REQUEST['interim-login'] ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		$interim_login    = isset( $_REQUEST['interim-login'] ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
 
 		$rememberme = intval( self::rememberme() );
 
@@ -2464,10 +2452,11 @@ class Two_Factor_Core {
 	private static function render_user_providers_form( $user, $providers ) {
 		$primary_provider_key      = self::get_primary_provider_key_selected_for_user( $user );
 		$available_providers       = self::get_available_providers_for_user( $user );
+		$recommended_provider_keys = self::get_recommended_providers( $user );
+
 		if ( is_wp_error( $available_providers ) ) {
 			$available_providers = array();
 		}
-		$recommended_provider_keys = self::get_recommended_providers( $user );
 
 		// Move the recommended providers first.
 		$recommended_providers = array_intersect_key( $providers, array_flip( $recommended_provider_keys ) );
@@ -2618,10 +2607,31 @@ class Two_Factor_Core {
 			return false;
 		}
 
+		if ( ! self::user_can_receive_email_codes( $user_id ) ) {
+			return false;
+		}
+
 		update_user_meta( $user_id, self::ENABLED_PROVIDERS_USER_META_KEY, array( self::FORCE_ALL_USERS_DEFAULT_PROVIDER ) );
 		update_user_meta( $user_id, self::PROVIDER_USER_META_KEY, self::FORCE_ALL_USERS_DEFAULT_PROVIDER );
 
 		return true;
+	}
+
+	/**
+	 * Whether a user has an address that email codes can be sent to.
+	 *
+	 * Two_Factor_Email reports itself available for every user, so enforcing it
+	 * on a user without a valid address would lock them out of their account.
+	 *
+	 * @since 0.16.1
+	 *
+	 * @param int $user_id User ID.
+	 * @return bool
+	 */
+	public static function user_can_receive_email_codes( $user_id ) {
+		$user = get_userdata( $user_id );
+
+		return $user && is_email( $user->user_email );
 	}
 
 	/**
@@ -2645,11 +2655,14 @@ class Two_Factor_Core {
 	public static function schedule_force_all_users_backfill() {
 		self::cancel_force_all_users_backfill();
 		update_option( self::FORCE_ALL_USERS_BATCH_OFFSET_OPTION, 0 );
+		update_option( self::FORCE_ALL_USERS_SKIPPED_OPTION, 0 );
 		wp_schedule_single_event( time(), self::FORCE_ALL_USERS_CRON_HOOK );
 	}
 
 	/**
 	 * Cancel any in-progress site-wide backfill.
+	 *
+	 * The skipped-user count is kept so the settings page can still report it once a run finishes.
 	 *
 	 * @since 0.16.1
 	 *
@@ -2658,6 +2671,17 @@ class Two_Factor_Core {
 	public static function cancel_force_all_users_backfill() {
 		wp_clear_scheduled_hook( self::FORCE_ALL_USERS_CRON_HOOK );
 		delete_option( self::FORCE_ALL_USERS_BATCH_OFFSET_OPTION );
+	}
+
+	/**
+	 * Number of users the last backfill could not enrol (for example, no valid email address).
+	 *
+	 * @since 0.16.1
+	 *
+	 * @return int
+	 */
+	public static function get_force_all_users_skipped_count() {
+		return (int) get_option( self::FORCE_ALL_USERS_SKIPPED_OPTION, 0 );
 	}
 
 	/**
@@ -2673,27 +2697,46 @@ class Two_Factor_Core {
 			return;
 		}
 
-		$offset   = (int) get_option( self::FORCE_ALL_USERS_BATCH_OFFSET_OPTION, 0 );
+		$last_user_id = (int) get_option( self::FORCE_ALL_USERS_BATCH_OFFSET_OPTION, 0 );
+
+		/*
+		 * Page by ID rather than offset: deleting users between batches shifts an offset
+		 * window and silently skips people. WP_User_Query has no "ID greater than" argument.
+		 * "ID" needs no table prefix: the only table the query joins, usermeta, has no ID column.
+		 */
+		$after_last_user = static function ( $query ) use ( $last_user_id ) {
+			global $wpdb;
+			$query->query_where .= $wpdb->prepare( ' AND ID > %d', $last_user_id );
+		};
+
+		add_action( 'pre_user_query', $after_last_user );
 		$user_ids = get_users(
 			array(
 				'fields'  => 'ID',
 				'number'  => self::FORCE_ALL_USERS_BATCH_SIZE,
-				'offset'  => $offset,
 				'orderby' => 'ID',
 				'order'   => 'ASC',
 			)
 		);
+		remove_action( 'pre_user_query', $after_last_user );
 
 		if ( empty( $user_ids ) ) {
 			self::cancel_force_all_users_backfill();
 			return;
 		}
 
+		$skipped = 0;
 		foreach ( $user_ids as $user_id ) {
-			self::enable_email_for_user_if_unconfigured( (int) $user_id );
+			if ( ! self::enable_email_for_user( (int) $user_id ) ) {
+				++$skipped;
+			}
 		}
 
-		update_option( self::FORCE_ALL_USERS_BATCH_OFFSET_OPTION, $offset + count( $user_ids ) );
+		if ( $skipped ) {
+			update_option( self::FORCE_ALL_USERS_SKIPPED_OPTION, self::get_force_all_users_skipped_count() + $skipped );
+		}
+
+		update_option( self::FORCE_ALL_USERS_BATCH_OFFSET_OPTION, (int) end( $user_ids ) );
 		wp_schedule_single_event( time() + 1, self::FORCE_ALL_USERS_CRON_HOOK );
 	}
 
@@ -2711,6 +2754,54 @@ class Two_Factor_Core {
 		}
 
 		self::enable_email_for_user( $user_id );
+	}
+
+	/**
+	 * Validate a second-factor code for a user outside the wp-login.php flow.
+	 *
+	 * Code that authenticates users itself (for example a headless login endpoint) must use
+	 * this rather than calling a provider's validate_authentication() directly: the providers
+	 * do no rate limiting of their own, so calling them directly allows unlimited guessing.
+	 * This runs the same checks as the login form: the provider must be enabled for the user,
+	 * attempts are rate limited and counted, and repeated failures can trigger a password reset.
+	 *
+	 * The provider reads the code from the request as it would on the login form
+	 * (for example `authcode` for TOTP, `two-factor-email-code` for email).
+	 *
+	 * @since 0.16.1
+	 *
+	 * @param WP_User $user         The user being authenticated.
+	 * @param string  $provider_key Provider class name, e.g. 'Two_Factor_Totp'.
+	 * @return true|WP_Error True when the code is valid, otherwise why it was rejected.
+	 */
+	public static function validate_second_factor( $user, $provider_key ) {
+		if ( ! ( $user instanceof WP_User ) ) {
+			return new WP_Error( 'two_factor_invalid_user', __( 'ERROR: Invalid user.', 'two-factor' ) );
+		}
+
+		$available_providers = self::get_available_providers_for_user( $user );
+		if ( is_wp_error( $available_providers ) ) {
+			return $available_providers;
+		}
+
+		$provider = isset( $available_providers[ $provider_key ] ) ? $available_providers[ $provider_key ] : null;
+		$result   = self::process_provider( $provider, $user, true );
+
+		if ( true !== $result ) {
+			if ( is_wp_error( $result ) ) {
+				// Same signal the login form sends, so brute-force and audit plugins see these attempts too.
+				do_action( 'wp_login_failed', $user->user_login, $result ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core WordPress action.
+			}
+
+			// false means the provider only handled a pre-processing request, such as resending an email code.
+			return is_wp_error( $result ) ? $result : new WP_Error( 'two_factor_not_validated', __( 'ERROR: The verification code was not checked.', 'two-factor' ) );
+		}
+
+		// Mirror a successful wp-login.php validation so earlier failures stop counting against the user.
+		delete_user_meta( $user->ID, self::USER_RATE_LIMIT_KEY );
+		delete_user_meta( $user->ID, self::USER_FAILED_LOGIN_ATTEMPTS_KEY );
+
+		return true;
 	}
 
 	/**

@@ -207,7 +207,7 @@ function two_factor_maybe_force_email_for_user( $enabled, $user_id ) {
 		return $enabled;
 	}
 
-	if ( ! empty( $enabled ) ) {
+	if ( ! empty( $enabled ) || ! Two_Factor_Core::user_can_receive_email_codes( $user_id ) ) {
 		return $enabled;
 	}
 
